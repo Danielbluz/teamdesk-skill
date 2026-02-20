@@ -350,14 +350,58 @@ For grouped data in merge documents, use a many-to-many relationship as an inter
 3. In the merge document, iterate categories first, then details within each category
 4. Each category section gets its own subtotal
 
-### Backup & Administration
+### Backup & Restore CLI (`td` tool)
 
-**Selective Backup with -X Flag**
-Exclude large tables from backup using the command-line tool:
+Cross-platform console tool (Windows/macOS/Linux, Intel/AMD/ARM). Download from KB article #856.
+
+**Basic commands:**
+```bash
+td backup <url> -u=<token> -f=<folder> -v          # Full backup
+td restore <url> -u=<token> -f=<mapping-file> -v    # Restore from CSV
 ```
-td backup -X "Large Table Name" -X "Another Table"
+
+The `<url>` accepts multiple formats — all equivalent:
+- `101885` (just the database ID)
+- `https://www.teamdesk.net/secure/api/v2/101885/`
+- `https://www.teamdesk.net/secure/db/101885/overview.aspx`
+
+**Key options:**
+
+| Option | Description |
+|--------|-------------|
+| `-u=<token>` | API token (or email). Restore requires Manage Data privilege |
+| `-f=<folder>` | Backup folder. Supports date patterns: `-f=backup_{0:yyyy-MM-dd}` |
+| `-t=<table>` | Backup/restore specific table(s). Repeat for multiple: `-t=Invoice -t=Item` |
+| `-X=<table>` | Exclude table(s): `-X="Audit Log" -X="Large Table"` |
+| `--culture=<locale>` | Locale for date/number parsing. **Use `pt-BR` for DD/MM/YYYY and comma decimals** |
+| `-v` | Verbose progress output |
+| `-b` | Stop on first error (default: recover and continue) |
+| `--encoding=<enc>` | CSV encoding (default: UTF-8) |
+| `-d=<char>` | Column delimiter (default: TAB) |
+
+**Incremental behavior:** On subsequent runs, the tool compares the stored `.tdbackup` structure with the current schema. If unchanged, it only downloads new/modified records — significantly faster than full backup.
+
+**Restore error handling:** Records that fail validation are written to a separate error file alongside the original CSV, with the error description as the last column. The original file is left intact for re-processing.
+
+**Custom CSV mapping file (.tdbackup or .txt):**
+Create custom imports from any CSV source using this mapping format:
 ```
-Useful when audit/log tables inflate backup size beyond practical limits.
+; Comments start with semicolon
+Invoices.csv -> Invoice
+Invoice # -> Id
+Address -> Address
+
+Items.csv -> Item
+* -> *
+Ignore This Column ->
+```
+
+Mapping rules:
+- `File.csv -> TableName` — maps CSV file to a table (use singular table name)
+- `CSV Column -> TD Column` — maps a specific column
+- `* -> *` — auto-match all columns by name
+- `Column ->` — explicitly ignore a column (overrides `*->*`)
+- Empty line separates table blocks
 
 **Two-Factor Authentication**
 Only available via SSO/SAML 2.0 in Enterprise Edition. Standard TeamDesk does not support 2FA natively. Workaround: use a password-protected page (external) that embeds TeamDesk via iframe.
