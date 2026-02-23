@@ -162,19 +162,44 @@ GET /api/v2/{db_id}/{table}/describe.json
 
 ## Attachment Method
 
-Download/upload file attachments.
-
 ### Download
 ```
 GET /api/v2/{db_id}/{table}/{column}/attachment?id={row_id}
 GET /api/v2/{db_id}/{table}/{column}/attachment/{guid}
 ```
+Returns binary file with appropriate Content-Type. HEAD also supported (metadata only).
 
-### Upload
+### Upload (via multipart/related on Create/Update/Upsert)
+
+There is **NO** dedicated upload endpoint. The `POST /{table}/{column}/attachment` endpoint does NOT exist (returns 405).
+
+File uploads work **inline** with Create/Update/Upsert using `Content-Type: multipart/related`:
+
 ```
-POST /api/v2/{db_id}/{table}/{column}/attachment?id={row_id}
-Content-Type: multipart/form-data
+POST /api/v2/{db_id}/{table}/update.json
+Authorization: Bearer {token}
+Content-Type: multipart/related;boundary={boundary}
+
+--{boundary}
+Content-Type: application/json;charset=UTF-8
+
+[{"@row.id": 42, "FileColumn": "cid:{content-id}"}]
+--{boundary}
+Content-Type: application/pdf
+Content-Disposition: attachment;filename*=UTF-8''{url-encoded-filename}
+Content-ID: {content-id}
+
+{binary file data}
+--{boundary}--
 ```
+
+**Key details:**
+- Use `@row.id` (NOT `Id`) to identify records in update.json
+- `cid:{content-id}` in the JSON references the file MIME part by its Content-ID
+- Works with create.json, update.json, and upsert.json
+- Multiple files: add extra MIME parts with unique Content-IDs
+- CSV import (`td import`) does NOT support attachment columns
+- Ref: [ForeSoftCorp/TeamDesk-RESTAPI-PHP](https://github.com/ForeSoftCorp/TeamDesk-RESTAPI-PHP)
 
 ## User Method
 
@@ -241,50 +266,6 @@ TeamDesk supports conditional caching:
 ## CORS Support
 
 TeamDesk API supports Cross-Origin Resource Sharing for browser-based requests.
-
-## Hidden/Undocumented Endpoints
-
-### Export View as Excel/CSV
-Download a view's data as a file (useful for scheduled reports via n8n or Call URL):
-```
-GET {URLRoot()}/exportview.aspx/report.xlsx?format=2&id={ViewID}
-```
-
-| Format | Value | Extension |
-|--------|-------|-----------|
-| CSV | 0 | .csv |
-| XLSX | 2 | .xlsx |
-
-The `ViewID` is found in the URL when viewing it in TeamDesk (after `id=`). The filename in the URL path (e.g., `report.xlsx`) becomes the downloaded file's name.
-
-### Gateway Auto-Login (Chaining)
-Authenticate and redirect in one request (for automated downloads or iframe embedding):
-```
-GET https://www.teamdesk.net/secure/gateway.aspx?action=Login&email={email}&password={password}&ReturnURL={encoded_url}
-```
-
-> **Security Warning:** Password is sent in plaintext in the URL. Only use in server-side automation (n8n Call URL), never in client-side code or shared links.
-
-### Email to Database
-Native feature (no API needed): Setup > Tools > Email to Database creates a unique email address per table. Incoming emails are automatically parsed into records:
-- Subject → Text column
-- Body → Memo column
-- From → Email column
-- Attachments → File Attachment column
-
-Configure column mappings in the setup wizard. Useful for receiving automated reports (e.g., FusionSolar daily emails).
-
-## Filter Variables in Call URL
-
-When using dynamic values in API filter parameters, always URLEncode the value:
-```
-GET /api/v2/{db_id}/{table}/select.json?filter=Contains([Name], '` & URLEncode([SearchTerm]) & `')
-```
-
-For date filters:
-```
-filter=[Date]>=ToDate("` & Format([StartDate], "yyyy-MM-dd") & `")
-```
 
 ## Output Formats
 

@@ -1387,49 +1387,6 @@ ToDate([Date Created]) + Case([Priority], "High", Days(2), "Medium", Days(5), Da
 "https://www.google.com/search?q=" & URLEncode([Name])
 ```
 
-### Inline Chart (QuickChart.io)
-Formula-URL column that renders as a chart image in XHTML:
-```
-"https://quickchart.io/chart?c=" & URLEncode("{type:'bar',data:{labels:['" & [Month1] & "','" & [Month2] & "','" & [Month3] & "'],datasets:[{label:'kWh',data:[" & ToText([Val1]) & "," & ToText([Val2]) & "," & ToText([Val3]) & "],backgroundColor:'rgba(76,175,80,0.7)'}]}}")
-```
-
-### Progress Bar (Formula-XHTML)
-```
-"<div class='pb'><progress value='" & ToText(Int([Percentage])) & "' max='100'></progress> " & Format([Percentage], "0") & "%</div>"
-```
-Requires CSS in `dbstyles-V3.css`:
-```css
-.pb progress { width: 200px; height: 20px; }
-.pb progress::-webkit-progress-value { background: #4CAF50; }
-.pb progress::-moz-progress-bar { background: #4CAF50; }
-```
-
-### Pre-filtered View Link (Formula-URL)
-```
-URLRoot() & "/table/view?filter=" & URLEncode("[Status]=""Overdue""")
-```
-
-### Custom Auto-Number (Per-Category)
-For sequences like `INV-2026-001` per client:
-```
-[Category Prefix] & "-" & ToText(Year(Today())) & "-" & PadLeft(ToText([Sequence]), 3, "0")
-```
-Where `[Sequence]` is set via Summary Max() + 1 on create, with Unique constraint.
-
-### JSON Fragment for API Batching
-Child record formula that builds its JSON representation:
-```
-"{""id"":""" & [External ID] & """,""value"":" & ToText([Amount]) & "}"
-```
-Parent Summary: `"[" & Concatenate(",", [JSON Fragment]) & "]"` → ready for a single API call.
-
-### File Rename via Formula-URL
-Assign a Formula-URL to a File Attachment column to force a rename:
-```
-Replace([File URL], ".jfif", ".jpg")
-```
-When a URL is assigned to a File Attachment, TeamDesk downloads the file using the URL's filename.
-
 ---
 
 ## Formula Column Types

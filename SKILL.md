@@ -37,6 +37,7 @@ Authorization: Bearer {token}
 | delete | GET/POST | Delete records |
 | describe | GET | Get table/column metadata |
 | attachment | GET | Download file attachments |
+| create/update/upsert | POST (multipart/related) | Upload file attachments inline |
 
 ### Common API Patterns
 
@@ -59,6 +60,86 @@ Content-Type: application/json
 GET /api/v2/{db_id}/{table}/{view}/select.json?top=500
 Authorization: Bearer {token}
 ```
+
+### File Attachment Upload (multipart/related)
+
+File attachments **can** be uploaded via the REST API using `multipart/related` encoding on Create, Update, or Upsert endpoints. There is **no** separate upload endpoint — the file is sent inline with the record data.
+
+**Protocol:**
+1. The JSON payload references the file via `"FieldName": "cid:{content_id}"`
+2. The file binary is sent as a separate MIME part with matching `Content-ID`
+3. `Content-Type` header must be `multipart/related;boundary={boundary}`
+4. For `update.json`, use `@row.id` (NOT `Id`) to identify the record
+
+**HTTP Request format:**
+```
+POST /secure/api/v2/{db_id}/{table}/update.json
+Authorization: Bearer {token}
+Content-Type: multipart/related;boundary=part-abc123
+
+--part-abc123
+Content-Type: application/json;charset=UTF-8
+
+[{"@row.id": 42, "MyFileColumn": "cid:unique-id-here"}]
+--part-abc123
+Content-Type: application/pdf
+Content-Disposition: attachment;filename*=UTF-8''report.pdf
+Content-ID: unique-id-here
+
+{binary file data}
+--part-abc123--
+```
+
+**Python example (urllib, no external deps):**
+```python
+import json, uuid, urllib.request, urllib.parse
+
+def upload_attachment(table, row_id, file_column, file_path, filename, token):
+    """Upload file to attachment column via multipart/related."""
+    content_id = str(uuid.uuid4())
+    boundary = f'part-{uuid.uuid4().hex}'
+
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+
+    record = {'@row.id': row_id, file_column: f'cid:{content_id}'}
+    json_payload = json.dumps([record], ensure_ascii=False)
+
+    import mimetypes
+    mime = mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+    enc_name = urllib.parse.quote(filename)
+
+    body = b''.join([
+        f'--{boundary}\r\n'.encode(),
+        b'Content-Type: application/json;charset=UTF-8\r\n\r\n',
+        json_payload.encode('utf-8'), b'\r\n',
+        f'--{boundary}\r\n'.encode(),
+        f'Content-Type: {mime}\r\n'.encode(),
+        f'Content-Disposition: attachment;filename*=UTF-8\'\'{enc_name}\r\n'.encode(),
+        f'Content-ID: {content_id}\r\n\r\n'.encode(),
+        file_data, b'\r\n',
+        f'--{boundary}--'.encode(),
+    ])
+
+    BASE = 'https://www.teamdesk.net/secure/api/v2/101885'
+    url = f'{BASE}/{urllib.parse.quote(table)}/update.json'
+    req = urllib.request.Request(url, data=body, headers={
+        'Authorization': f'Bearer {token}',
+        'Content-Type': f'multipart/related;boundary={boundary}',
+    }, method='POST')
+
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+```
+
+**Key notes:**
+- Works with `create.json`, `update.json`, and `upsert.json`
+- Multiple files: add extra MIME parts, each with unique `Content-ID`
+- `@row.id` is required for update (NOT the user-defined `Id` Autonumber column)
+- To get `@row.id`: it's always included in `select.json` responses automatically
+- Ref: [ForeSoftCorp/TeamDesk-RESTAPI-PHP](https://github.com/ForeSoftCorp/TeamDesk-RESTAPI-PHP) `RestApi.php` → `doUpsert()`
+
+> **Important:** The `attachment` GET endpoint is read-only (download). CSV import (`td import`) also does NOT support attachment columns. `multipart/related` on Create/Update/Upsert is the **only** programmatic way to upload files.
 
 ### Key API Notes
 
@@ -191,236 +272,254 @@ while (hasMore) {
 return allRecords;
 ```
 
+## Backup & Restore (CLI `td`)
+
+Ferramenta cross-platform unificada para backup, restore, import e export de dados TeamDesk.
+
+**Download:** https://teamdesk.crmdesk.com/answer.aspx?aid=22386
+**Plataformas:** Windows 10+, macOS Catalina+, Linux (CentOS 7+, Debian 10+, Ubuntu 18.04+) — x64 e ARM64
+
+### Sintaxe Base
+```
+td <command> <url> -u <user> -p <password> [options]
+```
+
+A `<url>` é a base da API: `https://www.teamdesk.net/secure/api/v2/{database_id}`
+
+### Comandos
+
+**Backup completo:**
+```bash
+td backup https://www.teamdesk.net/secure/api/v2/101885 -u user@email.com -p senha --verbose
+```
+
+**Restore completo:**
+```bash
+td restore https://www.teamdesk.net/secure/api/v2/101885 -u user@email.com -p senha
+```
+
+**Export (tabela específica com filtro):**
+```bash
+td export <url> -u ... -p ... --file dados.csv --table "Usina Solar" --column Nome Potencia Status --filter "not IsNull([Status])" --sort Nome//ASC
+```
+
+**Import (tabela específica):**
+```bash
+td import <url> -u ... -p ... --file dados.csv --table "Usina Solar" --column Nome --column Data=Date --column Criado=Timestamp
+```
+
+**Import excluindo colunas:**
+```bash
+td import <url> -u ... -p ... --file dados.csv --table "Usina Solar" --exclude "Data Criação"
+```
+
+### Parâmetros Principais
+
+| Parâmetro | Abreviação | Descrição |
+|-----------|------------|-----------|
+| `--user` | `-u` | Email do usuário |
+| `--password` | `-p` | Senha |
+| `--file` | `-f` | Arquivo CSV (`-` para stdout) |
+| `--table` | | Tabela alvo (import/export) |
+| `--column` | | Colunas (repetir para múltiplas, aceita mapeamento `NomeCSV=Tipo`) |
+| `--exclude` | | Excluir colunas do import |
+| `--filter` | | Expressão de filtro (fórmulas TeamDesk) |
+| `--sort` | | Ordenação (`Coluna//ASC` ou `Coluna//DESC`) |
+| `--culture` | | Locale para formatação (`pt-BR`, `en-US`) |
+| `--verbose` | | Saída detalhada |
+
+### Response Files (reutilizar credenciais)
+
+Criar arquivo `forgreen.txt`:
+```
+https://www.teamdesk.net/secure/api/v2/101885
+--user daniel@forgreen.com.br
+--password senha123
+```
+
+Usar com `@`:
+```bash
+td backup @forgreen.txt --verbose
+td export @forgreen.txt --file usinas.csv --table "Usina Solar"
+```
+
+Combinar múltiplos: `td export @forgreen.txt @csv-options.txt`
+
+### Configuração Global
+
+Arquivo `td.config.yml` (YAML) para defaults:
+```yaml
+culture: pt-BR
+verbose: true
+```
+
+### Notas
+- Argumentos aceitam 3 formatos: `--user valor`, `--user:valor`, `--user=valor`
+- Import de URLs: colunas de attachment baixam automaticamente o conteúdo da URL
+- GUI (Windows-only) ainda disponível, mas será substituída por versão Web
+
+## AI Data Analysis (2025)
+
+Recurso nativo para consultar dados em linguagem natural, disponível no menu lateral do TeamDesk.
+
+### Como funciona
+1. Acesse **Data Analysis** no menu lateral (acima de dashboards/views)
+2. Faça perguntas em linguagem natural sobre seus dados
+3. Peça gráficos, refinamentos, agrupamentos
+4. Resultados são salvos automaticamente com histórico de conversa
+5. Botão "Copy" para exportar respostas para email/apresentações
+
+### Acesso
+- Disponível apenas para usuários com **Full Access setup permissions** (expansão planejada)
+- Respeita permissões de tabelas/colunas existentes
+- Dados processados via Microsoft Azure (East US 2)
+
+### Instruções por Tabela (AI Instructions)
+Personalize o comportamento da IA por tabela criando arquivos Markdown em **Database Resources**:
+
+Acesse via botão **"Edit Instructions"** nas configurações da tabela. Conteúdo sugerido:
+
+```markdown
+# Instruções para tabela Geração Mensal
+
+## Colunas importantes
+- `Energia_Gerada_kWh`: valor principal de geração
+- `Periodo`: usar para filtros temporais (formato YYYY/MM)
+- `Instalacao`: identificador da usina
+
+## Filtros comuns
+- Excluir registros com `Status = "Cancelado"`
+- Período padrão: últimos 12 meses
+
+## Representação
+- Sempre totalizar `Energia_Gerada_kWh` (não fazer média)
+- Agrupar por `Instalacao` e `Periodo` (mês)
+- Gráfico preferido: barras empilhadas
+```
+
+As instruções são aplicadas automaticamente em toda análise daquela tabela.
+
+## Document Generation (MERGEFIELD Avançado)
+
+### Update Fields (Avaliação em 2 passes)
+Ativar em: Template de documento > marcar **"Update Fields"** (desativado por default).
+
+**Passo 1**: Substitui MERGEFIELDs com valores do registro
+**Passo 2**: Avalia campos Word restantes (~60 tipos)
+
+**Exemplos avançados:**
+```
+{ IF { MERGEFIELD Amount } = 1 "One" "Many" }
+→ Texto condicional baseado no valor
+
+{ ={ MERGEFIELD Contract_Sum } \* CardText }
+→ Converte número para texto por extenso ("one thousand")
+```
+
+## Workflow Patterns
+
+### Gerar Registros Filhos em Lote (Indexes Pattern)
+Para criar N registros filhos automaticamente (ex: parcelas de pagamento):
+
+**Estrutura**: 3 tabelas
+1. **Pai** (ex: Empréstimo): Amount, Number_of_Payments, Start_Date
+2. **Filho** (ex: Parcela): Amount, Date, Index, referência ao Pai
+3. **Indexes** (técnica): coluna `Index` com números sequenciais (1, 2, 3... até o máximo desejado)
+
+**Setup**:
+- Relação Many-to-Many entre Pai e Indexes com filtro: `[Index] <= Related[Number Of Payments]`
+- Custom Button no Pai → Record Create no Filho com assignments:
+  - `[Index]` = número sequencial
+  - `ParentKey()` = link ao registro Pai
+- Fórmulas calculadas no Filho:
+  ```
+  Amount: [Loan Amount] / [Loan Number Of Payments]
+  Date:   AdjustMonth(FirstDayOfMonth([Loan Start Date]), [Index])
+  ```
+
+### Merge de Registros Duplicados
+Para consolidar duplicatas mantendo registros filhos:
+
+1. **Detectar**: Summary column com filtro `[Name]=Related[Name] and [Id]<>Related[Id]`
+2. **Custom Button "Merge Master"**: Preenche `[Master Id]` nos duplicados
+3. **Trigger em [Master Id]**: Atualiza registros filhos apontando para o master
+4. **Deleta** duplicados após migração dos filhos
+
+## Custom JavaScript (Nova UI v3)
+
+### Detecção de versão
+```javascript
+if (window.V3) {
+    // Código para nova UI
+} else {
+    // Código para UI legada
+}
+```
+
+### APIs disponíveis (Nova UI)
+```javascript
+// Substitui jQuery(callback) — espera carregamento da página
+TD.ready(function() {
+    // seu código aqui
+});
+
+// Carregar scripts externos (sync ou async)
+FS.addScript("https://cdn.example.com/lib.js", function() {
+    // callback após carregamento
+});
+FS.addScript(["script1.js", "script2.js"], callback); // múltiplos
+```
+
+### Substituições jQuery → Nativo
+
+| jQuery (legado) | Nativo (nova UI) |
+|-----------------|------------------|
+| `$('selector').on('click', fn)` | `document.querySelector('selector').addEventListener('click', fn)` |
+| `$.qstring` | `new URLSearchParams(location.search)` |
+| `$.cookies` | `localStorage` / `sessionStorage` |
+| `$(document).ready(fn)` | `TD.ready(fn)` |
+
+### Migração rápida (carregar jQuery na nova UI)
+Criar arquivo `dbscript-v3.js` em Database Resources:
+```javascript
+document.write('<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>');
+document.write('<script src="res.aspx/dbscript.js"></script>');
+```
+
+## CSS Customization (Nova UI v3)
+
+A nova UI expõe **50+ CSS custom properties** para personalização. Arquivo CSS vai em **Database Resources**.
+
+### Variáveis mais úteis
+```css
+:root {
+    --v3-font-face: "IBM Plex Sans";          /* Fonte principal */
+    --v3-font-pref-normal: 14px;              /* Tamanho base */
+    --v3-border-radius: 6px;                  /* Cantos arredondados */
+    --v3-sidebar-width: 256px;                /* Largura do menu lateral */
+    --v3-transition-time: 300ms;              /* Duração de animações */
+    --v3-accent-color-h: 210;                 /* Cor de destaque (hue) */
+    --v3-accent-color-s: 100%;                /* Cor de destaque (saturação) */
+    --v3-accent-color-l: 40%;                 /* Cor de destaque (luminosidade) */
+}
+```
+
+### Paleta de cores disponíveis
+`blue`, `red`, `orange`, `yellow`, `green`, `teal`, `navy`, `violet`, `purple`, `pink`, `black`, `white`, `gray`
+
+Acessar via: `--v3-palette-{nome}-color-h/s/l` (ex: `--v3-palette-green-color-h`)
+
+### Hierarquia de cores
+Tabela → Database → Domain (herança automática, tabela sem cor usa a do database)
+
+> Referência completa de CSS properties: `references/css-properties.md`
+
 ## Reference Files
 
 For detailed information, see:
 - **references/api-reference.md**: Complete API method documentation, parameters, response formats, error codes
 - **references/formula-reference.md**: Full function list organized by category with examples
-
-## Community Patterns & Workarounds
-
-*Curated from 100+ forum posts (Feb 2026 scan). Proven techniques shared by TeamDesk power users.*
-
-### UI Enhancements
-
-**Inline Charts with QuickChart.io (Formula-URL + XHTML)**
-Embed live charts inside forms using a Formula-URL column:
-```
-"https://quickchart.io/chart?c=" & URLEncode("{type:'bar',data:{labels:['" & [Label1] & "','" & [Label2] & "'],datasets:[{data:[" & [Value1] & "," & [Value2] & "]}]}}")
-```
-Display via Formula-XHTML: `"<img src='" & [Chart URL] & "' width='400'/>"`. Customize with CSS in `dbstyles-V3.css`.
-
-**Progress Bar in Forms (Formula-XHTML)**
-```
-"<div class='pb-container'><progress value='" & ToText([Percentage]) & "' max='100'></progress><span>" & Format([Percentage], "0") & "%</span></div>"
-```
-Style in `dbstyles-V3.css`:
-```css
-.pb-container progress { width: 200px; height: 20px; }
-.pb-container progress::-webkit-progress-value { background: #4CAF50; }
-```
-
-**Pre-filtered View URLs in Dashboards**
-Create clickable links that open a view with filters pre-applied:
-```
-URLRoot() & "/table/view?filter=" & URLEncode("[Status]=""Overdue""")
-```
-Useful for dashboard tiles showing counts that drill into filtered lists.
-
-**Pop-up Forms via dbscript.js**
-Open a quick-entry form in a popup window without leaving the current record:
-```javascript
-// In dbscript.js
-$("#popup-btn").click(function(){
-  window.open(URLRoot + "/table/new?field=value", "", "width=800,height=600");
-});
-```
-
-### Workflow Patterns
-
-**Status Flip Pattern (Conditional Trigger Execution)**
-Use a checkbox or status column as a "trigger switch":
-1. Create a checkbox column `Run Export` (default: unchecked)
-2. Create a Record Change Trigger on `Run Export` with filter `[Run Export] = true`
-3. Trigger action executes (e.g., Call URL, Email, Record Create)
-4. Final action: Record Update to reset `Run Export` = false
-
-This gives users an on-demand button for workflow execution, avoiding the need for manual triggers.
-
-**Webhook Notification → Callback Pattern**
-When receiving webhooks from external systems that send minimal data:
-1. Webhook receives short notification (e.g., `{id: 123, event: "updated"}`)
-2. Use `Response("id")` to extract the ID
-3. Chain a Call URL action to fetch full data: `GET https://api.external.com/records/` & Response("id")
-4. Process the full response with `Response("field.subfield")`
-
-**Auto-generate N Child Records (RecordSet as Source)**
-Create multiple child records automatically from a parent:
-1. Parent table has a RecordSet column pointing to a "template" table
-2. Record Create action uses the RecordSet column as its source
-3. TeamDesk iterates automatically, creating one child per RecordSet item
-4. Each child inherits values from the template + `ParentKey()` for the reference
-
-**Master/Detail Clone (RecordSet + Workflow)**
-Clone a parent record with all its children using workflows:
-1. Record Create action creates the new parent (with modified fields)
-2. Use RecordSet column (pointing to original children) as source for child creation
-3. Workflow chain: Create Parent → Get New Parent Key → Create Children with `ParentKey()`
-
-Note: Custom Actions are obsolete. Use RecordSet + workflow actions instead.
-
-### Data & API Patterns
-
-**Export View as Excel (Hidden Endpoint)**
-```
-URLRoot() & "/exportview.aspx/filename.xlsx?format=2&id=" & [View ID]
-```
-Formats: `0`=CSV, `2`=XLSX. Useful for scheduled report generation via Call URL or n8n.
-
-**Email to Database (Native Feature)**
-Setup > Tools > Email to Database creates a unique email address per table. Incoming emails become records with fields mapped from Subject, Body, From, Attachments. No external tools needed.
-
-**Custom AutoNumbering (Per-Category Sequences)**
-For sequences like "INV-2026-001" per client or category:
-1. Create a Number column `Sequence` with Unique constraint
-2. Formula-Number: `Max([Sequence]) + 1` (filtered by category via Summary)
-3. Set via Record Create action or default value
-4. Unique constraint prevents duplicates under concurrent access
-
-**Multi-Record Single API Call (Array Formula + Summary)**
-Batch data from multiple child records into one API call:
-1. Child records each have a Formula-Text building their JSON fragment
-2. Parent has Summary column: `Concatenate(",", [JSON Fragment])`
-3. Call URL body uses: `"[" & [Concatenated JSON] & "]"`
-4. Single API call sends all children's data
-
-**Number-to-Words via Auxiliary Table**
-More reliable than nested formulas for converting amounts to text:
-1. Create helper table with 1,000 records (0-999), each with the word representation
-2. Lookup column references the helper table by numeric value
-3. Combine thousands + hundreds + units via formula
-4. Works for any language (Portuguese, Spanish, English)
-
-**Bulk File Download (Downloadyze Extension)**
-Chrome extension [Downloadyze](https://chromewebstore.google.com/detail/downloadyze) can bulk-download all file attachments from a TeamDesk view. Useful for backup or migration.
-
-### Client-Side Customization (dbscript.js / dbstyles-V3.css)
-
-**JavaScript Field Value Access**
-Read field values in dbscript.js using the internal field ID:
-```javascript
-$(document).ready(function(){
-  var val = $('[name="f_43406340"]').val();
-  var num = parseInt(val); // Convert to number for calculations
-});
-```
-Find field IDs via browser DevTools (inspect the field element).
-
-**Cookies/localStorage for Session State**
-Persist user preferences or filter state across page loads:
-```javascript
-// Save
-localStorage.setItem("lastFilter", filterValue);
-// Restore
-var saved = localStorage.getItem("lastFilter");
-if (saved) { /* apply filter */ }
-```
-
-**AI Data Analysis (New Feature, Jan 2026)**
-TeamDesk now includes built-in AI analysis per table. Configure custom instructions at Setup > Tables > [Table] > AI Instructions to guide the AI's analysis context (e.g., "This table tracks solar energy generation. kWh values should never be negative.").
-
-### Document Generation
-
-**CardText for Numbers in Words (Word Merge Documents)**
-Display numeric amounts as words in generated Word/PDF documents:
-```
-{ ={ MERGEFIELD Amount } \* CardText }
-```
-Outputs: "One Thousand Five Hundred" for 1500. Only works in English. For Portuguese/Spanish, use the auxiliary table approach above.
-
-**Dynamic Checkboxes in Merge Documents**
-```
-{ IF { MERGEFIELD Active } = "true" "☑ Active" "☐ Active" }
-```
-
-**Subcategories/Subtotals in Documents**
-For grouped data in merge documents, use a many-to-many relationship as an intermediary:
-1. Create a "Category" table with category names
-2. Link detail records to categories via many-to-many
-3. In the merge document, iterate categories first, then details within each category
-4. Each category section gets its own subtotal
-
-### Backup & Restore CLI (`td` tool)
-
-Cross-platform console tool (Windows/macOS/Linux, Intel/AMD/ARM). Download from KB article #856.
-
-**Basic commands:**
-```bash
-td backup <url> -u=<token> -f=<folder> -v          # Full backup
-td restore <url> -u=<token> -f=<mapping-file> -v    # Restore from CSV
-```
-
-The `<url>` accepts multiple formats — all equivalent:
-- `101885` (just the database ID)
-- `https://www.teamdesk.net/secure/api/v2/101885/`
-- `https://www.teamdesk.net/secure/db/101885/overview.aspx`
-
-**Key options:**
-
-| Option | Description |
-|--------|-------------|
-| `-u=<token>` | API token (or email). Restore requires Manage Data privilege |
-| `-f=<folder>` | Backup folder. Supports date patterns: `-f=backup_{0:yyyy-MM-dd}` |
-| `-t=<table>` | Backup/restore specific table(s). Repeat for multiple: `-t=Invoice -t=Item` |
-| `-X=<table>` | Exclude table(s): `-X="Audit Log" -X="Large Table"` |
-| `--culture=<locale>` | Locale for date/number parsing. **Use `pt-BR` for DD/MM/YYYY and comma decimals** |
-| `-v` | Verbose progress output |
-| `-b` | Stop on first error (default: recover and continue) |
-| `--encoding=<enc>` | CSV encoding (default: UTF-8) |
-| `-d=<char>` | Column delimiter (default: TAB) |
-
-**Incremental behavior:** On subsequent runs, the tool compares the stored `.tdbackup` structure with the current schema. If unchanged, it only downloads new/modified records — significantly faster than full backup.
-
-**Restore error handling:** Records that fail validation are written to a separate error file alongside the original CSV, with the error description as the last column. The original file is left intact for re-processing.
-
-**Custom CSV mapping file (.tdbackup or .txt):**
-Create custom imports from any CSV source using this mapping format:
-```
-; Comments start with semicolon
-Invoices.csv -> Invoice
-Invoice # -> Id
-Address -> Address
-
-Items.csv -> Item
-* -> *
-Ignore This Column ->
-```
-
-Mapping rules:
-- `File.csv -> TableName` — maps CSV file to a table (use singular table name)
-- `CSV Column -> TD Column` — maps a specific column
-- `* -> *` — auto-match all columns by name
-- `Column ->` — explicitly ignore a column (overrides `*->*`)
-- Empty line separates table blocks
-
-**Two-Factor Authentication**
-Only available via SSO/SAML 2.0 in Enterprise Edition. Standard TeamDesk does not support 2FA natively. Workaround: use a password-protected page (external) that embeds TeamDesk via iframe.
-
-### Import & Matching Patterns
-
-**Multi-Column Matching on Import**
-When importing data that may match existing records by different identifiers:
-1. Create multiple many-to-many relationships (one per matching criterion)
-2. Use Summary column `Count([Matched Records])` to identify matches
-3. Filter for records where any match count > 0
-4. Process matches in order of specificity (exact ID > email > name)
-
-**Web-to-Record with Auto-Matching**
-For forms that need to link to existing records without user selection:
-1. Form captures identifying fields (email, phone, name)
-2. Record Create trigger fires
-3. Many-to-many relationship auto-links by matching criteria
-4. Summary "Number of Matched Records" confirms the link
+- **references/css-properties.md**: Complete list of CSS custom properties for UI customization
 
 ## Limits
 
@@ -429,3 +528,4 @@ For forms that need to link to existing records without user selection:
 - Export to CSV: 100,000 records
 - Trigger processing: 100 records per licensed user + 1,000 for external users pack
 - SQL Server backend: Millions of records per table supported
+- AI Data Analysis: Rate limit (mensagem "Try again in XX seconds")
